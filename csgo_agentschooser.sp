@@ -90,12 +90,16 @@ public Plugin myinfo =
 	url = "http://steamcommunity.com/id/franug"
 }
 
+bool g_bReady = false;
+
+Database g_database = null;
+
 int g_iTeam[MAXPLAYERS + 1], g_iCategory[MAXPLAYERS + 1];
 char g_ctAgent[MAXPLAYERS + 1][128], g_tAgent[MAXPLAYERS + 1][128];
 
 Handle c_CTAgent, c_TAgent;
 
-ConVar cv_timer, cv_noOverwritte, cv_instant, cv_autoopen;
+ConVar cv_timer, cv_noOverwritte, cv_instant, cv_autoopen, cv_usedb;
 
 bool _checkedMsg[MAXPLAYERS + 1];
 
@@ -115,12 +119,76 @@ public void OnPluginStart()
 	cv_instant = CreateConVar("sm_csgoagents_instantly", "1", "Enable or disable apply agents skins instantly");
 	cv_timer = CreateConVar("sm_csgoagents_timer", "0.2", "Time on Spawn for apply agent skins");
 	cv_noOverwritte = CreateConVar("sm_csgoagents_nooverwrittecustom", "1", "No apply agent model if the user already have a custom model. 1 = no apply when custom model, 0 = disable this feature");
-	
-	for(int i = 1; i <= MaxClients; i++)
-		if(IsClientInGame(i) && AreClientCookiesCached(i))
+	cv_usedb = CreateConVar("sm_csgoagents_usedb", "1", "Whether to use a database instead of clientprefs.");
+}
+
+public void OnConfigsExecuted()
+{
+	g_bReady = true;
+
+	if (cv_usedb.BoolValue)
+	{
+		Database.Connect(DBCallback_Connect, "csgo_agents");
+	}
+	else
+	{
+		for(int i = 1; i <= MaxClients; ++i)
+			if(IsClientInGame(i) && AreClientCookiesCached(i))
+			{
+				OnClientCookiesCached(i);
+			}
+	}
+}
+
+public void OnClientPostAdminCheck(int client)
+{
+	if (!g_bReady)
+	{
+		return;
+	}
+
+	if (cv_usedb.BoolValue && g_database != null)
+	{
+		DB_SelectClientAgent(client);
+	}
+}
+
+public void OnClientCookiesCached(int client)
+{
+	if (!g_bReady)
+	{
+		return;
+	}
+
+	if (!cv_usedb.BoolValue)
+	{
+		GetClientCookie(client, c_CTAgent, g_ctAgent[client], 128);
+		GetClientCookie(client, c_TAgent, g_tAgent[client], 128);
+	}
+}
+
+public void OnClientDisconnect(int client)
+{
+	if(!IsFakeClient(client))
+	{
+		if (cv_usedb.BoolValue)
 		{
-			OnClientCookiesCached(i);
+			if (g_database != null)
+			{
+				DB_UpdateClientAgent(client);
+			}
 		}
+		else if (AreClientCookiesCached(client))
+		{
+			SetClientCookie(client, c_TAgent, g_tAgent[client]);
+			SetClientCookie(client, c_CTAgent, g_ctAgent[client]);
+		}
+		
+	}
+	
+	strcopy(g_ctAgent[client], 128, "");
+	strcopy(g_tAgent[client], 128, "");
+	_checkedMsg[client] = false;
 }
 
 // I generate these files automatically with code instead of do it manually like a good programmer :p
@@ -285,26 +353,7 @@ public Action Command_GenerateModelsForStore(client, args)
 	return Plugin_Handled;
 }
 
-public void OnClientCookiesCached(int client)
-{
-	GetClientCookie(client, c_CTAgent, g_ctAgent[client], 128);
-	GetClientCookie(client, c_TAgent, g_tAgent[client], 128);
-}
-
-public void OnClientDisconnect(int client)
-{
-	if(!IsFakeClient(client) && AreClientCookiesCached(client))
-	{
-		SetClientCookie(client, c_TAgent, g_tAgent[client]);
-		SetClientCookie(client, c_CTAgent, g_ctAgent[client]);
-	}
-	
-	strcopy(g_ctAgent[client], 128, "");
-	strcopy(g_tAgent[client], 128, "");
-	_checkedMsg[client] = false;
-}
-
-public Action Command_Main(client, args)
+public Action Command_Main(int client, int args)
 {
 	Menu menu = new Menu(SelectTeam, MenuAction_Select  | MenuAction_End);
 	
@@ -363,7 +412,7 @@ void OpenAgentsMenu(int client)
 	DisplayMenu(menu, client, MENU_TIME_FOREVER);
 }
 
-public int SelectType(Handle:menu, MenuAction:action, param1, param2)
+public int SelectType(Handle menu, MenuAction action, int param1, int param2)
 {
 	switch (action)
 	{
@@ -397,7 +446,7 @@ public int SelectType(Handle:menu, MenuAction:action, param1, param2)
 			g_iCategory[param1] = param2;
 		}
 		
-		case MenuAction_Cancel, MenuCancel_ExitBack:
+		case MenuAction_Cancel:
  		{
  			Command_Main(param1, 0);
  		}
@@ -557,7 +606,7 @@ public int AgentChoosed(Handle:menu, MenuAction:action, param1, param2)
 				//OpenAgentsMenu(param1);
 			}
 		}
-		case MenuAction_Cancel, MenuCancel_ExitBack:
+		case MenuAction_Cancel:
  		{
  			OpenAgentsMenu(param1);
  		}
@@ -625,4 +674,105 @@ stock bool isAgentSelected(int client)
 		return true;
 		
 	return false;
+}
+
+public void DBCallback_Connect(Database db, const char[] error, any data)
+{
+	if (db == null)
+	{
+		return;
+	}
+
+	g_database = db;
+	SQL_FastQuery(g_database, "CREATE TABLE IF NOT EXISTS `player_agents` (`account_id` INT UNSIGNED NOT NULL, `ct_agent` VARCHAR(128) NOT NULL, `t_agent` VARCHAR(128) NOT NULL, PRIMARY KEY (`account_id`)) ENGINE = InnoDB;");
+
+	for (int i = 1; i < MaxClients; ++i)
+	{
+		if (!IsFakeClient(i))
+		{
+			DB_SelectClientAgent(i);
+		}
+	}
+}
+
+void DB_SelectClientAgent(int client)
+{
+	int accountID = GetSteamAccountID(client);
+	if (accountID == 0)
+	{
+		return;
+	}
+
+	static char query[128];
+	Format(query, sizeof(query), "SELECT `ct_agent`, `t_agent` FROM `player_agents` WHERE `account_id` = '%d' LIMIT 1;", accountID);
+	g_database.Query(DBCallback_SelectClientAgent, query, GetClientUserId(client));
+}
+
+public void DBCallback_SelectClientAgent(Database db, DBResultSet results, const char[] error, int userid)
+{
+	if (results == null)
+	{
+		PrintToServer("DBCallback_SelectClientAgent: %s", error);
+		return;
+	}
+
+	int client = GetClientOfUserId(userid);
+	if (client == 0)
+	{
+		return;
+	}
+
+	if (results.FetchRow())
+	{
+		results.FetchString(0, g_ctAgent[client], 128);
+		results.FetchString(1, g_tAgent[client], 128);
+	}
+	else
+	{
+		DB_InsertClientAgent(client)
+	}
+}
+
+void DB_InsertClientAgent(int client)
+{
+	int accountID = GetSteamAccountID(client);
+	if (accountID == 0)
+	{
+		return;
+	}
+
+	static char query[128];
+	Format(query, sizeof(query), "INSERT INTO `player_agents` (`account_id`, `ct_agent`, `t_agent`) VALUES ('%d', '', '');", accountID);
+	g_database.Query(DBCallback_InsertClientAgent, query);
+}
+
+public void DBCallback_InsertClientAgent(Database db, DBResultSet results, const char[] error, any data)
+{
+	if (results == null)
+	{
+		PrintToServer("DBCallback_InsertClientAgent: %s", error);
+		return;
+	}
+}
+
+void DB_UpdateClientAgent(int client)
+{
+	int accountID = GetSteamAccountID(client);
+	if (accountID == 0)
+	{
+		return;
+	}
+
+	static char query[512];
+	Format(query, sizeof(query), "UPDATE `player_agents` SET `ct_agent` = '%s', `t_agent` = '%s' WHERE `account_id` = '%d';", g_ctAgent[client], g_tAgent[client], accountID);
+	g_database.Query(DBCallback_UpdateClientAgent, query);
+}
+
+public void DBCallback_UpdateClientAgent(Database db, DBResultSet results, const char[] error, any data)
+{
+	if (results == null)
+	{
+		PrintToServer("DBCallback_UpdateClientAgent: %s", error);
+		return;
+	}
 }
