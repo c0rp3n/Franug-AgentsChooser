@@ -688,7 +688,7 @@ public void DBCallback_Connect(Database db, const char[] error, any data)
 
 	for (int i = 1; i < MaxClients; ++i)
 	{
-		if (!IsFakeClient(i))
+		if (IsClientInGame(i) && !IsFakeClient(i))
 		{
 			DB_SelectClientAgent(i);
 		}
